@@ -213,7 +213,15 @@ var (
 		{Name: "min_idle_cpu", Type: prometheus.GaugeValue, Help: "Minimum CPU idle", RegexIndex: 10},
 	}
 	statusRegex = regexp.MustCompile(`(\d+) session\(s\) since startup\s+(\d+) session\(s\) - peak (\d+), last 5min (\d+)\s+(\d+) session\(s\) per Sec out of max (\d+), peak (\d+), last 5min (\d+)\s+(\d+) session\(s\) max\s+min idle cpu (\d+\.\d+)\/(\d+\.\d+)`)
+
+	errCommandNotFound = errors.New("command not found")
 )
+
+// isCommandNotFound reports FreeSWITCH's "-ERR <command> Command not found!"
+// reply, sent when the module providing the command is not loaded.
+func isCommandNotFound(response []byte) bool {
+	return bytes.HasPrefix(response, []byte("-ERR ")) && bytes.Contains(response, []byte("Command not found"))
+}
 
 // NewCollector processes uri, timeout and methods and returns a new Collector.
 func NewCollector(uri string, timeout time.Duration, password string, rtpEnable bool, channelDurationEnabled bool, channelDurationThresholds []float64, logger kitlog.Logger) (*Collector, error) {
@@ -348,6 +356,11 @@ func (c *Collector) scapeMetrics(ch chan<- prometheus.Metric) error {
 		}
 
 		value, err := c.fetchMetric(&metricDef)
+
+		if errors.Is(err, errCommandNotFound) {
+			level.Debug(c.logger).Log("msg", "skipping metric", "metric", metricDef.Name, "err", err)
+			continue
+		}
 
 		if err != nil {
 			log.Printf("failed to fetch metric: %s", err)
@@ -703,6 +716,12 @@ func (c *Collector) vertoMetrics(ch chan<- prometheus.Metric) error {
 	if err != nil {
 		return err
 	}
+
+	if isCommandNotFound(response) {
+		level.Debug(c.logger).Log("msg", "skipping verto metrics", "err", errCommandNotFound)
+		return nil
+	}
+
 	vt := Verto{}
 	decode := xml.NewDecoder(bytes.NewReader(response))
 	decode.CharsetReader = charset.NewReaderLabel
@@ -783,6 +802,10 @@ func (c *Collector) fetchMetric(metricDef *Metric) (float64, error) {
 
 	if err != nil {
 		return 0, err
+	}
+
+	if isCommandNotFound(response) {
+		return 0, fmt.Errorf("%w: %s", errCommandNotFound, metricDef.Command)
 	}
 
 	switch metricDef.Name {
